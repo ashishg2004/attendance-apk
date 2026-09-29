@@ -1,4 +1,6 @@
 import Dexie from 'dexie';
+import { supabase } from './supabaseClient';
+import { syncCloudToLocal, syncLocalToCloud, pushLabourToCloud, pushAttendanceToCloud, pushPaymentToCloud } from './syncManager';
 
 export const db = new Dexie('LabourAttendanceDB');
 
@@ -24,7 +26,6 @@ db.version(3).stores({
   attendances: 'id, user_id, labour_id, date, status, timestamp, [labour_id+date]',
   payments: 'id, user_id, labour_id, date, amount, timestamp'
 }).upgrade(async tx => {
-  // Migration: Default existing records to 'user_demo'
   const defaultUserId = 'user_demo';
   await tx.table('labours').toCollection().modify(labour => {
     if (!labour.user_id) labour.user_id = defaultUserId;
@@ -35,7 +36,6 @@ db.version(3).stores({
   await tx.table('payments').toCollection().modify(pay => {
     if (!pay.user_id) pay.user_id = defaultUserId;
   });
-  // Ensure demo user exists
   const existingDemoUser = await tx.table('users').get(defaultUserId);
   if (!existingDemoUser) {
     await tx.table('users').add({
@@ -117,6 +117,12 @@ export function setActiveUserSession(user) {
     site_name: user.site_name || 'My Construction Site'
   };
   localStorage.setItem(SESSION_STORAGE_KEY, JSON.stringify(sessionData));
+  
+  // Trigger background cloud sync on login
+  syncCloudToLocal(user.id).then(() => {
+    syncLocalToCloud(user.id);
+  }).catch(() => {});
+
   return sessionData;
 }
 
@@ -127,8 +133,23 @@ export function clearActiveUserSession() {
 export async function registerUser({ username, phone, password, site_name }) {
   const cleanUsername = username.trim().toLowerCase();
   const cleanPhone = phone ? phone.trim() : '';
+  const cleanSiteName = site_name ? site_name.trim() : `${username}'s Site`;
 
-  // Check if username already exists
+  // 1. Check if user exists in Supabase
+  try {
+    const { data: cloudUsers } = await supabase
+      .from('users')
+      .select('*')
+      .eq('username', cleanUsername);
+
+    if (cloudUsers && cloudUsers.length > 0) {
+      throw new Error('Username already exists in Cloud. Please choose a different username or Login.');
+    }
+  } catch (e) {
+    if (e.message.includes('already exists')) throw e;
+  }
+
+  // 2. Check Local DB
   const existingUser = await db.users
     .where('username')
     .equals(cleanUsername)
@@ -144,31 +165,85 @@ export async function registerUser({ username, phone, password, site_name }) {
     username: cleanUsername,
     phone: cleanPhone,
     password: password.trim(),
-    site_name: site_name ? site_name.trim() : `${username}'s Site`,
+    site_name: cleanSiteName,
     createdAt: new Date().toISOString()
   };
 
+  // Save Local
   await db.users.add(newUser);
+
+  // Save Supabase Cloud
+  try {
+    await supabase.from('users').insert({
+      id: userId,
+      username: cleanUsername,
+      phone: cleanPhone,
+      password: password.trim(),
+      site_name: cleanSiteName
+    });
+  } catch (err) {
+    console.warn('Could not register in Supabase cloud (Offline mode):', err);
+  }
+
   return setActiveUserSession(newUser);
 }
 
 export async function loginUser({ usernameOrPhone, password }) {
   const query = usernameOrPhone.trim().toLowerCase();
-  
-  const allUsers = await db.users.toArray();
-  const matchedUser = allUsers.find(
-    u => u.username.toLowerCase() === query || (u.phone && u.phone === query)
-  );
+  let matchedUser = null;
 
+  // 1. Try Cloud Authentication first
+  try {
+    const { data: cloudUsers, error } = await supabase
+      .from('users')
+      .select('*')
+      .or(`username.eq.${query},phone.eq.${query}`);
+
+    if (!error && cloudUsers && cloudUsers.length > 0) {
+      const u = cloudUsers[0];
+      if (u.password === password.trim()) {
+        matchedUser = {
+          id: u.id,
+          username: u.username,
+          phone: u.phone || '',
+          password: u.password,
+          site_name: u.site_name || `${u.username}'s Site`,
+          createdAt: u.created_at || new Date().toISOString()
+        };
+
+        // Cache user in local DB
+        await db.users.put(matchedUser);
+      } else {
+        throw new Error('Incorrect password. Please try again.');
+      }
+    }
+  } catch (e) {
+    if (e.message.includes('Incorrect password')) throw e;
+    console.warn('Cloud login fallback to local DB:', e);
+  }
+
+  // 2. Fallback to Local DB authentication if offline or cloud search was skipped
   if (!matchedUser) {
-    throw new Error('User not found. Please check your username/phone.');
+    const allUsers = await db.users.toArray();
+    matchedUser = allUsers.find(
+      u => u.username.toLowerCase() === query || (u.phone && u.phone === query)
+    );
+
+    if (!matchedUser) {
+      throw new Error('User not found. Please check your username/phone.');
+    }
+
+    if (matchedUser.password !== password.trim()) {
+      throw new Error('Incorrect password. Please try again.');
+    }
   }
 
-  if (matchedUser.password !== password.trim()) {
-    throw new Error('Incorrect password. Please try again.');
-  }
+  const session = setActiveUserSession(matchedUser);
 
-  return setActiveUserSession(matchedUser);
+  // Restore Cloud Data to Local DB for this user
+  syncCloudToLocal(matchedUser.id);
+
+  return session;
 }
 
 // Helper: Get active user ID or default
@@ -217,46 +292,59 @@ export async function addLabour(data, userId) {
   };
 
   await db.labours.add(newStaff);
+  pushLabourToCloud(newStaff);
   return newStaff;
+}
+
+// Helper: Update Labour / Staff
+export async function updateLabour(id, updates) {
+  await db.labours.update(id, updates);
+  const updated = await db.labours.get(id);
+  if (updated) pushLabourToCloud(updated);
 }
 
 // Aliases for Staff terminology
 export const addStaff = addLabour;
 export const updateStaff = updateLabour;
 
-// Helper: Update Labour / Staff
-export async function updateLabour(id, updates) {
-  await db.labours.update(id, updates);
-}
-
 // Helper: Toggle Labour / Staff Active
 export async function toggleLabourActive(id, currentActiveState) {
   await db.labours.update(id, { active: !currentActiveState });
+  const updated = await db.labours.get(id);
+  if (updated) pushLabourToCloud(updated);
 }
 
-// Helper: Delete Single Labour and their Attendance records
+// Helper: Delete Single Labour and un-link Cloud
 export async function deleteLabour(id) {
+  const labour = await db.labours.get(id);
   await db.transaction('rw', db.labours, db.attendances, db.payments, async () => {
     await db.labours.delete(id);
     await db.attendances.where('labour_id').equals(id).delete();
     await db.payments.where('labour_id').equals(id).delete();
   });
+
+  if (labour) {
+    supabase.from('labours').delete().eq('id', id).catch(() => {});
+  }
 }
 
 // Helper: Clear ALL database data for current user
 export async function clearAllData(userId) {
   const activeUid = getCurrentUserId(userId);
   await db.transaction('rw', db.labours, db.attendances, db.payments, async () => {
-    const userLabours = await db.labours.where('user_id').equals(activeUid).toArray();
-    const labourIds = userLabours.map(l => l.id);
-
     await db.labours.where('user_id').equals(activeUid).delete();
     await db.attendances.where('user_id').equals(activeUid).delete();
     await db.payments.where('user_id').equals(activeUid).delete();
   });
+
+  if (activeUid && activeUid !== 'user_demo') {
+    supabase.from('labours').delete().eq('user_id', activeUid).catch(() => {});
+    supabase.from('attendances').delete().eq('user_id', activeUid).catch(() => {});
+    supabase.from('payments').delete().eq('user_id', activeUid).catch(() => {});
+  }
 }
 
-// Helper: Delete ALL attendance records for a specific date (e.g. 2026-09-23)
+// Helper: Delete ALL attendance records for a specific date
 export async function deleteAttendanceByDate(dateStr, userId) {
   if (!dateStr) return;
   const activeUid = getCurrentUserId(userId);
@@ -264,6 +352,10 @@ export async function deleteAttendanceByDate(dateStr, userId) {
   const userRecords = records.filter(r => r.user_id === activeUid || (!r.user_id && activeUid === 'user_demo'));
   const idsToDelete = userRecords.map(r => r.id);
   await db.attendances.bulkDelete(idsToDelete);
+
+  if (activeUid && activeUid !== 'user_demo') {
+    supabase.from('attendances').delete().eq('user_id', activeUid).eq('date', dateStr).catch(() => {});
+  }
 }
 
 // Helper: Save Attendance record (Single record per labour per date)
@@ -272,14 +364,17 @@ export async function saveAttendanceRecord(labourId, status, dateStr = getTodayD
   const recordId = `${activeUid}_${labourId}_${dateStr}`;
   const now = new Date().toISOString();
 
-  await db.attendances.put({
+  const record = {
     id: recordId,
     user_id: activeUid,
     labour_id: labourId,
     date: dateStr,
-    status: status, // 'PRESENT' | 'ABSENT'
+    status: status,
     timestamp: now
-  });
+  };
+
+  await db.attendances.put(record);
+  pushAttendanceToCloud(record);
 }
 
 // Payment Helper Methods for Accounts
@@ -295,86 +390,28 @@ export async function addPayment({ labour_id, amount, date = getTodayDateString(
     timestamp: new Date().toISOString()
   };
   await db.payments.add(newPayment);
+  pushPaymentToCloud(newPayment);
   return newPayment;
 }
 
 export async function deletePayment(id) {
   await db.payments.delete(id);
+  supabase.from('payments').delete().eq('id', id).catch(() => {});
 }
 
 export async function updatePayment(id, data) {
-  await db.payments.update(id, {
+  const updated = {
     amount: Number(data.amount),
     date: data.date,
     notes: data.notes ? data.notes.trim() : '',
     timestamp: new Date().toISOString()
-  });
+  };
+  await db.payments.update(id, updated);
+  const fullPayment = await db.payments.get(id);
+  if (fullPayment) pushPaymentToCloud(fullPayment);
 }
 
-export async function getAllPayments() {
-  return await db.payments.toArray();
-}
-
-export async function getPaymentsByLabour(labourId) {
-  return await db.payments.where('labour_id').equals(labourId).toArray();
-}
-
-// Helper: Seed initial sample data for demo/testing
-export async function seedSampleData(force = false) {
-  const labourCount = await db.labours.count();
-  if (labourCount > 0 && !force) return;
-
-  if (force) {
-    await db.labours.clear();
-    await db.attendances.clear();
-  }
-
-  const sampleLabours = [
-    { id: 'L001', name: 'Raj Kumar', phone: '9876543210', trade: 'Mason', active: true, createdAt: new Date().toISOString() },
-    { id: 'L002', name: 'Ramesh Kumar', phone: '9876543211', trade: 'Mason', active: true, createdAt: new Date().toISOString() },
-    { id: 'L003', name: 'Amit Sharma', phone: '9876543212', trade: 'Helper', active: true, createdAt: new Date().toISOString() },
-    { id: 'L004', name: 'Suresh Verma', phone: '9876543213', trade: 'Carpenter', active: true, createdAt: new Date().toISOString() },
-    { id: 'L005', name: 'Vikas Singh', phone: '9876543214', trade: 'Plumber', active: true, createdAt: new Date().toISOString() },
-    { id: 'L006', name: 'Manoj Gupta', phone: '9876543215', trade: 'Electrician', active: true, createdAt: new Date().toISOString() },
-    { id: 'L007', name: 'Dharmendra Yadav', phone: '9876543216', trade: 'Welder', active: true, createdAt: new Date().toISOString() },
-    { id: 'L008', name: 'Sunil Paswan', phone: '9876543217', trade: 'Helper', active: true, createdAt: new Date().toISOString() },
-    { id: 'L009', name: 'Pankaj Pandit', phone: '9876543218', trade: 'Painter', active: true, createdAt: new Date().toISOString() },
-    { id: 'L010', name: 'Deepak Maurya', phone: '9876543219', trade: 'Helper', active: true, createdAt: new Date().toISOString() },
-    { id: 'L011', name: 'Rakesh Prasad', phone: '9876543220', trade: 'Mason', active: true, createdAt: new Date().toISOString() },
-    { id: 'L012', name: 'Anil Chauhan', phone: '9876543221', trade: 'Bar Bending', active: true, createdAt: new Date().toISOString() },
-    { id: 'L013', name: 'Santosh Sah', phone: '9876543222', trade: 'Helper', active: true, createdAt: new Date().toISOString() },
-    { id: 'L014', name: 'Jitendra Thakur', phone: '9876543223', trade: 'Tile Fitter', active: true, createdAt: new Date().toISOString() },
-    { id: 'L015', name: 'Mukesh Pal', phone: '9876543224', trade: 'Supervisor', active: true, createdAt: new Date().toISOString() }
-  ];
-
-  await db.labours.bulkAdd(sampleLabours);
-
-  // Generate 6 days of historical attendance relative to today's date
-  const todayStr = getTodayDateString();
-  const [y, m, dNum] = todayStr.split('-').map(Number);
-  const baseDate = new Date(y, m - 1, dNum);
-  const attendanceRecords = [];
-
-  for (let i = 5; i >= 0; i--) {
-    const d = new Date(baseDate);
-    d.setDate(d.getDate() - i);
-    const dateStr = `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
-
-    sampleLabours.forEach((labour, idx) => {
-      if (i === 0 && idx >= 7) {
-        return; // Unmarked for today, so user can test resuming
-      }
-
-      const isPresent = (idx * 3 + i * 7) % 7 !== 0;
-      attendanceRecords.push({
-        id: `${labour.id}_${dateStr}`,
-        labour_id: labour.id,
-        date: dateStr,
-        status: isPresent ? 'PRESENT' : 'ABSENT',
-        timestamp: new Date(d.getTime() + 8 * 3600 * 1000).toISOString()
-      });
-    });
-  }
-
-  await db.attendances.bulkAdd(attendanceRecords);
+// Helper: Seed sample data (Compatibility export for App.jsx)
+export async function seedSampleData() {
+  return;
 }

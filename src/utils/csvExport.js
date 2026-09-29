@@ -24,7 +24,7 @@ export async function exportAttendanceCSV(dateFilter = null, activeUserId = null
 
   if (attendances.length === 0 && payments.length === 0) {
     alert('No attendance or payment records found for current staff to export!');
-    return;
+    return null;
   }
 
   // Combine attendance records and payment records into unified rows
@@ -103,54 +103,39 @@ export async function exportAttendanceCSV(dateFilter = null, activeUserId = null
   });
 
   // UTF-8 Byte Order Mark (\uFEFF) for Microsoft Excel compatibility
-  const csvText = '\uFEFF' + [headers.join(','), ...rows].join('\r\n');
+  const rawCsv = [headers.join(','), ...rows].join('\r\n');
+  const csvText = '\uFEFF' + rawCsv;
 
   const filename = dateFilter 
     ? `Staff_Attendance_Payments_${dateFilter}.csv`
     : `Staff_Attendance_Backup_${activeUid}_${new Date().toISOString().split('T')[0]}.csv`;
 
-  // Detect Capacitor Native Android Platform or Mobile WebView
-  const isNative = !!(window.Capacitor && window.Capacitor.isNativePlatform());
-
-  if (isNative) {
-    // For Native Android Capacitor WebView: Use Data URI to trigger native download
-    try {
-      const encodedUri = 'data:text/csv;charset=utf-8,' + encodeURIComponent(csvText);
-      const link = document.createElement('a');
-      link.setAttribute('href', encodedUri);
-      link.setAttribute('download', filename);
-      document.body.appendChild(link);
-      link.click();
-      setTimeout(() => {
-        if (document.body.contains(link)) document.body.removeChild(link);
-      }, 1000);
-      return;
-    } catch (e) {
-      console.warn('Native download fallback triggered:', e);
-    }
-  }
-
-  // Create Blob for standard web browsers
+  // Create Blob & Data URI
   const blob = new Blob([csvText], { type: 'text/csv;charset=utf-8;' });
+  const dataUri = 'data:text/csv;charset=utf-8,' + encodeURIComponent(csvText);
 
-  if (window.navigator && window.navigator.msSaveOrOpenBlob) {
-    window.navigator.msSaveOrOpenBlob(blob, filename);
-    return;
+  // Trigger standard browser download
+  try {
+    const blobUrl = URL.createObjectURL(blob);
+    const link = document.createElement('a');
+    link.setAttribute('href', blobUrl);
+    link.setAttribute('download', filename);
+    link.style.visibility = 'hidden';
+    document.body.appendChild(link);
+    link.click();
+    setTimeout(() => {
+      if (document.body.contains(link)) document.body.removeChild(link);
+      URL.revokeObjectURL(blobUrl);
+    }, 5000);
+  } catch (e) {
+    console.warn('Standard blob download error:', e);
   }
 
-  const blobUrl = URL.createObjectURL(blob);
-  const link = document.createElement('a');
-  link.setAttribute('href', blobUrl);
-  link.setAttribute('download', filename);
-  link.style.visibility = 'hidden';
-  
-  document.body.appendChild(link);
-  link.click();
-
-  setTimeout(() => {
-    if (document.body.contains(link)) {
-      document.body.removeChild(link);
-    }
-    URL.revokeObjectURL(blobUrl);
-  }, 10000);
+  return {
+    csvText: rawCsv,
+    fullCsv: csvText,
+    filename,
+    dataUri,
+    recordCount: combinedRecords.length
+  };
 }
