@@ -1,4 +1,4 @@
-import { db, saveAttendanceRecord, addLabour } from '../db/database';
+import { db, saveAttendanceRecord, addLabour, updateLabour, addPayment } from '../db/database';
 
 /**
  * Robust CSV parser that handles quotes, escaped quotes, multiline values, and BOM.
@@ -69,50 +69,128 @@ export function parseCSVText(csvText) {
 export function detectColumnMapping(headers = []) {
   const mapping = {
     date: '',
+    record_type: '',
     labour_id: '',
     name: '',
     trade: '',
-    status: ''
+    wage_type: '',
+    wage_rate: '',
+    status: '',
+    amount: '',
+    notes: ''
   };
 
-  headers.forEach((header, idx) => {
+  headers.forEach((header) => {
     const cleanHeader = header.toLowerCase().replace(/[^a-z0-9]/g, ' ').trim();
 
-    // Date
-    if (!mapping.date && (cleanHeader.includes('date') || cleanHeader.includes('tarikh') || cleanHeader === 'din' || cleanHeader === 'day')) {
-      mapping.date = header;
+    // Record Type
+    if (!mapping.record_type && (cleanHeader.includes('record type') || cleanHeader === 'type' || cleanHeader.includes('record_type'))) {
+      mapping.record_type = header;
     }
-    // Labour / Staff ID
-    else if (!mapping.labour_id && (cleanHeader.includes('staff id') || cleanHeader.includes('staff_id') || cleanHeader.includes('labour id') || cleanHeader.includes('worker id') || cleanHeader === 'id' || cleanHeader.includes('labour_id') || cleanHeader.includes('worker_id'))) {
+    // Staff / Labour ID
+    else if (!mapping.labour_id && (
+      cleanHeader.includes('staff id') || 
+      cleanHeader.includes('staff_id') || 
+      cleanHeader.includes('labour id') || 
+      cleanHeader.includes('worker id') || 
+      cleanHeader === 'id' || 
+      cleanHeader.includes('labour_id')
+    )) {
       mapping.labour_id = header;
     }
-    // Labour / Staff Name
-    else if (!mapping.name && (cleanHeader.includes('staff name') || cleanHeader.includes('staff_name') || cleanHeader.includes('name') || cleanHeader.includes('naam') || cleanHeader.includes('staff') || cleanHeader.includes('labour') || cleanHeader.includes('worker'))) {
-      mapping.name = header;
+    // Date
+    else if (!mapping.date && (
+      cleanHeader.includes('date') || 
+      cleanHeader.includes('tarikh') || 
+      cleanHeader === 'din' || 
+      cleanHeader === 'day'
+    )) {
+      mapping.date = header;
     }
-    // Trade
-    else if (!mapping.trade && (cleanHeader.includes('trade') || cleanHeader.includes('role') || cleanHeader.includes('designation') || cleanHeader.includes('kaam'))) {
+    // Trade / Role
+    else if (!mapping.trade && (
+      cleanHeader.includes('trade') || 
+      cleanHeader.includes('role') || 
+      cleanHeader.includes('designation') || 
+      cleanHeader.includes('kaam')
+    )) {
       mapping.trade = header;
     }
+    // Wage Basis / Type
+    else if (!mapping.wage_type && (
+      cleanHeader.includes('wage basis') || 
+      cleanHeader.includes('wage type') || 
+      cleanHeader.includes('basis') || 
+      cleanHeader.includes('salary type')
+    )) {
+      mapping.wage_type = header;
+    }
+    // Wage Rate / Daily Wage / Monthly Salary
+    else if (!mapping.wage_rate && (
+      cleanHeader.includes('wage rate') || 
+      cleanHeader.includes('daily wage') || 
+      cleanHeader.includes('monthly salary') || 
+      cleanHeader.includes('rate') || 
+      cleanHeader.includes('tankhah')
+    )) {
+      mapping.wage_rate = header;
+    }
     // Status
-    else if (!mapping.status && (cleanHeader.includes('status') || cleanHeader.includes('attendance') || cleanHeader.includes('present') || cleanHeader.includes('hazari'))) {
+    else if (!mapping.status && (
+      cleanHeader.includes('status') || 
+      cleanHeader.includes('attendance') || 
+      cleanHeader.includes('present') || 
+      cleanHeader.includes('hazari')
+    )) {
       mapping.status = header;
+    }
+    // Amount Paid / Payment
+    else if (!mapping.amount && (
+      cleanHeader.includes('amount') || 
+      cleanHeader.includes('paid') || 
+      cleanHeader.includes('payment') || 
+      cleanHeader.includes('rupees')
+    )) {
+      mapping.amount = header;
+    }
+    // Notes / Remarks
+    else if (!mapping.notes && (
+      cleanHeader.includes('notes') || 
+      cleanHeader.includes('timestamp') || 
+      cleanHeader.includes('remarks')
+    )) {
+      mapping.notes = header;
+    }
+  });
+
+  // Second pass specifically for Name, ensuring headers containing 'id' are excluded
+  headers.forEach((header) => {
+    const cleanHeader = header.toLowerCase().replace(/[^a-z0-9]/g, ' ').trim();
+    if (!mapping.name && !cleanHeader.includes('id') && (
+      cleanHeader.includes('name') || 
+      cleanHeader.includes('naam') || 
+      cleanHeader.includes('staff name') || 
+      cleanHeader.includes('labour name') || 
+      cleanHeader.includes('worker name') ||
+      cleanHeader === 'staff' ||
+      cleanHeader === 'labour'
+    )) {
+      mapping.name = header;
     }
   });
 
   // Fallbacks if not auto-matched
   if (!mapping.date && headers.length > 0) mapping.date = headers[0];
+  if (!mapping.labour_id && headers.length > 1 && headers[1].toLowerCase().includes('id')) mapping.labour_id = headers[1];
   if (!mapping.name && headers.length > 2) mapping.name = headers[2];
-  else if (!mapping.name && headers.length > 1) mapping.name = headers[1];
+  else if (!mapping.name && headers.length > 1 && mapping.labour_id !== headers[1]) mapping.name = headers[1];
   if (!mapping.status && headers.length > 4) mapping.status = headers[4];
-  else if (!mapping.status && headers.length > 3) mapping.status = headers[3];
 
   return mapping;
 }
 
 /**
  * Normalizes various date strings to YYYY-MM-DD
- * Supports: DD-MM-YYYY, YYYY-MM-DD, DD/MM/YYYY, MM/DD/YYYY, ISO dates
  */
 export function parseAndNormalizeDate(val) {
   if (!val) return null;
@@ -137,7 +215,6 @@ export function parseAndNormalizeDate(val) {
     return `${y}-${m}-${d}`;
   }
 
-  // Standard JS Date parse fallback
   const timestamp = Date.parse(str);
   if (!isNaN(timestamp)) {
     const dObj = new Date(timestamp);
@@ -169,29 +246,41 @@ export function parseAndNormalizeStatus(val) {
 }
 
 /**
- * Import attendance records into Dexie IndexedDB
+ * Import attendance and payment records into Dexie IndexedDB
  */
 export async function importAttendanceFromCSV({ headers, rows, mapping, activeUserId }) {
   if (!rows || rows.length === 0) {
     return { success: false, error: 'No data rows found in CSV' };
   }
 
-  const dateIdx = headers.indexOf(mapping.date);
+  const dateIdx = mapping.date ? headers.indexOf(mapping.date) : -1;
+  const recTypeIdx = mapping.record_type ? headers.indexOf(mapping.record_type) : -1;
   const labourIdIdx = mapping.labour_id ? headers.indexOf(mapping.labour_id) : -1;
   const nameIdx = mapping.name ? headers.indexOf(mapping.name) : -1;
   const tradeIdx = mapping.trade ? headers.indexOf(mapping.trade) : -1;
-  const statusIdx = headers.indexOf(mapping.status);
+  const wageTypeIdx = mapping.wage_type ? headers.indexOf(mapping.wage_type) : -1;
+  const wageRateIdx = mapping.wage_rate ? headers.indexOf(mapping.wage_rate) : -1;
+  const statusIdx = mapping.status ? headers.indexOf(mapping.status) : -1;
+  const amountIdx = mapping.amount ? headers.indexOf(mapping.amount) : -1;
+  const notesIdx = mapping.notes ? headers.indexOf(mapping.notes) : -1;
 
-  if (dateIdx === -1 || statusIdx === -1 || (labourIdIdx === -1 && nameIdx === -1)) {
-    return { success: false, error: 'Required mapping columns (Date, Status, and Labour ID or Name) must be selected.' };
+  if (dateIdx === -1 || (labourIdIdx === -1 && nameIdx === -1)) {
+    return { success: false, error: 'Required mapping columns (Date and Labour ID or Name) must be selected.' };
   }
 
   // Fetch current labours for user
-  let existingLabours = await db.labours.where('user_id').equals(activeUserId).toArray();
-  const labourByIdMap = new Map(existingLabours.map(l => [l.id.toLowerCase(), l]));
+  let existingLabours = [];
+  if (activeUserId) {
+    existingLabours = await db.labours.where('user_id').equals(activeUserId).toArray();
+  } else {
+    existingLabours = await db.labours.toArray();
+  }
+
+  const labourByIdMap = new Map(existingLabours.map(l => [l.id.toLowerCase().trim(), l]));
   const labourByNameMap = new Map(existingLabours.map(l => [l.name.toLowerCase().trim(), l]));
 
   let importedCount = 0;
+  let paymentsCount = 0;
   let skippedCount = 0;
   let createdLaboursCount = 0;
   const datesSet = new Set();
@@ -200,10 +289,15 @@ export async function importAttendanceFromCSV({ headers, rows, mapping, activeUs
   for (let i = 0; i < rows.length; i++) {
     const row = rows[i];
     const rawDate = row[dateIdx];
-    const rawStatus = row[statusIdx];
+    const rawRecType = recTypeIdx >= 0 ? String(row[recTypeIdx] || '').trim().toLowerCase() : '';
+    const rawStatus = statusIdx >= 0 ? row[statusIdx] : '';
     const rawLabourId = labourIdIdx >= 0 ? row[labourIdIdx] : '';
     const rawName = nameIdx >= 0 ? row[nameIdx] : '';
     const rawTrade = tradeIdx >= 0 ? row[tradeIdx] : '';
+    const rawWageType = wageTypeIdx >= 0 ? String(row[wageTypeIdx] || '').trim().toLowerCase() : '';
+    const rawWageRate = wageRateIdx >= 0 ? Number(row[wageRateIdx] || 0) : 0;
+    const rawAmount = amountIdx >= 0 ? Number(row[amountIdx] || 0) : 0;
+    const rawNotes = notesIdx >= 0 ? String(row[notesIdx] || '').trim() : '';
 
     const formattedDate = parseAndNormalizeDate(rawDate);
     if (!formattedDate) {
@@ -212,10 +306,9 @@ export async function importAttendanceFromCSV({ headers, rows, mapping, activeUs
       continue;
     }
 
-    const cleanStatus = parseAndNormalizeStatus(rawStatus);
     const cleanId = rawLabourId ? String(rawLabourId).replace(/^["']|["']$/g, '').trim().toLowerCase() : '';
     const cleanName = rawName ? String(rawName).replace(/^["']|["']$/g, '').trim() : '';
-    const cleanTrade = rawTrade ? String(rawTrade).replace(/^["']|["']$/g, '').trim() : 'General Helper';
+    const cleanTrade = rawTrade ? String(rawTrade).replace(/^["']|["']$/g, '').trim() : 'General Staff';
 
     if (!cleanId && !cleanName) {
       skippedCount++;
@@ -231,36 +324,74 @@ export async function importAttendanceFromCSV({ headers, rows, mapping, activeUs
       targetLabour = labourByNameMap.get(cleanName.toLowerCase());
     }
 
-    // Auto-create labour if not found
+    // Parsed wage preferences from CSV if present
+    const isMonthly = rawWageType.includes('month');
+    const parsedWageType = isMonthly ? 'monthly' : 'daily';
+    const parsedRate = rawWageRate > 0 ? rawWageRate : null;
+
+    // Create labour if not found
     if (!targetLabour) {
-      const labourName = cleanName || `Labour ${cleanId}`;
+      const labourName = cleanName || `Staff ${cleanId}`;
+      const initialDailyWage = parsedWageType === 'daily' && parsedRate ? parsedRate : 500;
+      const initialMonthlySalary = parsedWageType === 'monthly' && parsedRate ? parsedRate : (initialDailyWage * 30);
+
       try {
         targetLabour = await addLabour({
           name: labourName,
-          trade: cleanTrade || 'General Helper',
-          daily_wage: 500
+          trade: cleanTrade || 'General Staff',
+          wage_type: parsedWageType,
+          daily_wage: initialDailyWage,
+          monthly_salary: initialMonthlySalary
         }, activeUserId);
 
-        // Update local maps for subsequent rows
-        labourByIdMap.set(targetLabour.id.toLowerCase(), targetLabour);
+        labourByIdMap.set(targetLabour.id.toLowerCase().trim(), targetLabour);
         labourByNameMap.set(targetLabour.name.toLowerCase().trim(), targetLabour);
         createdLaboursCount++;
       } catch (err) {
         skippedCount++;
-        errors.push(`Row ${i + 2}: Could not create labour "${labourName}"`);
+        errors.push(`Row ${i + 2}: Could not create staff "${labourName}"`);
         continue;
       }
+    } else if (parsedRate && parsedRate > 0) {
+      // Update existing labour's wage rates if CSV contains custom wage data
+      const updates = {};
+      if (parsedWageType === 'monthly') {
+        updates.wage_type = 'monthly';
+        updates.monthly_salary = parsedRate;
+      } else {
+        updates.wage_type = 'daily';
+        updates.daily_wage = parsedRate;
+      }
+      await updateLabour(targetLabour.id, updates);
+      Object.assign(targetLabour, updates);
     }
 
-    // Save attendance record
-    await saveAttendanceRecord(targetLabour.id, cleanStatus, formattedDate, activeUserId);
-    importedCount++;
+    // Determine if Payment row vs Attendance row
+    const isPaymentRow = rawRecType === 'payment' || rawStatus.toLowerCase().includes('payment') || rawStatus.toLowerCase().includes('paid') || rawAmount > 0;
+
+    if (isPaymentRow && rawAmount > 0) {
+      // Record payment transaction
+      await addPayment({
+        labour_id: targetLabour.id,
+        amount: rawAmount,
+        date: formattedDate,
+        notes: rawNotes || 'Restored Payment'
+      }, activeUserId);
+      paymentsCount++;
+    } else {
+      // Record attendance
+      const cleanStatus = parseAndNormalizeStatus(rawStatus);
+      await saveAttendanceRecord(targetLabour.id, cleanStatus, formattedDate, activeUserId);
+      importedCount++;
+    }
+
     datesSet.add(formattedDate);
   }
 
   return {
     success: true,
     importedCount,
+    paymentsCount,
     updatedDatesCount: datesSet.size,
     createdLaboursCount,
     skippedCount,

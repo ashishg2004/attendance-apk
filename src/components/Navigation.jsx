@@ -11,7 +11,7 @@ export default function Navigation({ activeTab, setActiveTab }) {
   ];
 
   return (
-    <nav className="fixed bottom-4 left-4 right-4 z-40 max-w-md mx-auto">
+    <nav className="fixed bottom-3 sm:bottom-4 left-4 right-4 z-40 max-w-md mx-auto mb-[env(safe-area-inset-bottom,0px)]">
       <div className="bg-white/95 backdrop-blur-2xl border border-[#EFEAE1] rounded-[28px] p-2 shadow-xl shadow-[#1E382B]/10 flex items-center justify-around">
         {navItems.map((item) => {
           const Icon = item.icon;

@@ -181,7 +181,7 @@ export default function App() {
       />
 
       {/* Main View Container with smooth tab transition animation */}
-      <main key={activeTab} className="flex-1 max-w-md w-full mx-auto p-4 page-view-enter">
+      <main key={activeTab} className="flex-1 max-w-md w-full mx-auto p-4 pb-28 page-view-enter">
         {activeTab === 'today' && (
           <TodayView
             labours={labours}

@@ -23,7 +23,7 @@ export default function Header({ currentDateStr, onDataChanged, currentUser, onL
   };
 
   return (
-    <header className="sticky top-0 z-30 bg-[#FAF7F2]/95 backdrop-blur-xl border-b border-[#EFEAE1] px-4 py-3">
+    <header className="sticky top-0 z-30 bg-[#FAF7F2]/95 backdrop-blur-xl border-b border-[#EFEAE1] px-4 pt-4 sm:pt-3 pb-3.5 pt-[calc(env(safe-area-inset-top,0px)+14px)] shadow-sm">
       <div className="max-w-md mx-auto flex items-center justify-between">
         <div className="flex items-center space-x-2.5">
           <div className="w-10 h-10 rounded-2xl bg-[#1E382B] flex items-center justify-center text-white shadow-md shadow-[#1E382B]/15 tactile-btn">
