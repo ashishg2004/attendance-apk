@@ -19,7 +19,7 @@ export default function Header({ currentDateStr, onDataChanged, currentUser, onL
   };
 
   const handleExport = async () => {
-    await exportAttendanceCSV();
+    await exportAttendanceCSV(null, currentUser?.id);
   };
 
   return (
