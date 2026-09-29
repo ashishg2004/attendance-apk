@@ -32,7 +32,6 @@ export async function exportAttendanceCSV(dateFilter = null, activeUserId = null
 
   // Attendance Records
   attendances.forEach(a => {
-    // Only include if the staff member belongs to current user
     if (labourMap.has(a.labour_id)) {
       combinedRecords.push({
         date: a.date,
@@ -83,7 +82,7 @@ export async function exportAttendanceCSV(dateFilter = null, activeUserId = null
 
   const rows = combinedRecords.map(rec => {
     const labour = labourMap.get(rec.labourId);
-    const dateFormatted = rec.date; // Standard YYYY-MM-DD format (prevents Excel ######## column overflow)
+    const dateFormatted = rec.date; // Standard YYYY-MM-DD format
     const name = labour ? labour.name : 'Unknown';
     const trade = labour ? labour.trade : 'General Staff';
     const wageBasis = labour ? (labour.wage_type === 'monthly' ? 'Monthly' : 'Daily') : 'Daily';
@@ -110,7 +109,28 @@ export async function exportAttendanceCSV(dateFilter = null, activeUserId = null
     ? `Staff_Attendance_Payments_${dateFilter}.csv`
     : `Staff_Attendance_Backup_${activeUid}_${new Date().toISOString().split('T')[0]}.csv`;
 
-  // Create Blob with explicit MIME type
+  // Detect Capacitor Native Android Platform or Mobile WebView
+  const isNative = !!(window.Capacitor && window.Capacitor.isNativePlatform());
+
+  if (isNative) {
+    // For Native Android Capacitor WebView: Use Data URI to trigger native download
+    try {
+      const encodedUri = 'data:text/csv;charset=utf-8,' + encodeURIComponent(csvText);
+      const link = document.createElement('a');
+      link.setAttribute('href', encodedUri);
+      link.setAttribute('download', filename);
+      document.body.appendChild(link);
+      link.click();
+      setTimeout(() => {
+        if (document.body.contains(link)) document.body.removeChild(link);
+      }, 1000);
+      return;
+    } catch (e) {
+      console.warn('Native download fallback triggered:', e);
+    }
+  }
+
+  // Create Blob for standard web browsers
   const blob = new Blob([csvText], { type: 'text/csv;charset=utf-8;' });
 
   if (window.navigator && window.navigator.msSaveOrOpenBlob) {

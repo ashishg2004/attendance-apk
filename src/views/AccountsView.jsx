@@ -364,8 +364,8 @@ export default function AccountsView({ labours = [], onAttendanceUpdated }) {
 
       {/* RECORD / EDIT PAYMENT MODAL */}
       {selectedLabourForPayment && (
-        <div className="fixed inset-0 z-50 bg-[#1E382B]/80 backdrop-blur-xl flex items-center justify-center p-4 modal-backdrop-animate">
-          <div className="bg-[#FAF7F2] border border-[#EFEAE1] text-[#1E382B] rounded-[28px] w-full max-w-md p-6 shadow-2xl modal-content-animate">
+        <div className="fixed inset-0 z-50 bg-[#1E382B]/80 backdrop-blur-xl flex items-center justify-center p-4 overflow-y-auto modal-backdrop-animate">
+          <div className="bg-[#FAF7F2] border border-[#EFEAE1] text-[#1E382B] rounded-[28px] w-full max-w-md p-6 shadow-2xl modal-content-animate my-auto max-h-[90vh] overflow-y-auto">
             <div className="flex items-center justify-between pb-3 border-b border-[#EFEAE1]">
               <div>
                 <h3 className="text-base font-black text-[#1E382B]">
@@ -449,8 +449,8 @@ export default function AccountsView({ labours = [], onAttendanceUpdated }) {
 
       {/* WORKER PAYMENT HISTORY MODAL */}
       {selectedLabourForHistory && (
-        <div className="fixed inset-0 z-50 bg-[#1E382B]/80 backdrop-blur-xl flex items-center justify-center p-4 modal-backdrop-animate">
-          <div className="bg-[#FAF7F2] border border-[#EFEAE1] text-[#1E382B] rounded-[28px] w-full max-w-md p-6 shadow-2xl modal-content-animate">
+        <div className="fixed inset-0 z-50 bg-[#1E382B]/80 backdrop-blur-xl flex items-center justify-center p-4 overflow-y-auto modal-backdrop-animate">
+          <div className="bg-[#FAF7F2] border border-[#EFEAE1] text-[#1E382B] rounded-[28px] w-full max-w-md p-6 shadow-2xl modal-content-animate my-auto max-h-[90vh] overflow-y-auto">
             <div className="flex items-center justify-between pb-3 border-b border-[#EFEAE1]">
               <div>
                 <h3 className="text-base font-black text-[#1E382B]">
